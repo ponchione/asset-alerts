@@ -1,0 +1,16 @@
+[Unit]
+Description=Personal Discord asset price alerts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/source/asset-alerts
+ExecStart=%h/source/asset-alerts/.venv/bin/asset-alerts run
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
