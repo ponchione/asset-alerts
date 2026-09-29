@@ -1,8 +1,12 @@
 # Asset Alerts
 
-A personal Discord bot for gold, silver, and bitcoin prices. Runs on an always-on
-Linux desktop and sends alerts to one private channel. Only your Discord account
+A personal Discord bot for gold, silver, and bitcoin prices. Runs locally on
+Linux and sends alerts to one private channel. Only your Discord account
 can use its commands, and only in that channel.
+
+The [next-step plan](docs/plan.md) covers free price-history collection, charts,
+database backups, and moving from the laptop to the main PC. History, charting,
+and a backup command are planned; the reference below describes what works today.
 
 ## First setup
 
@@ -46,6 +50,12 @@ the local `prices` command or core tests.
 Command responses are visible only to you. Alerts are ordinary channel messages
 that mention your configured user. A notification already being sent may finish
 before a remove command takes effect.
+
+`/prices` displays each asset in its own spaced block, with a bold name and price
+and a smaller update line. Stale quotes carry a separate warning.
+Discord timestamps display a readable date and time in your timezone, together
+with a live relative age such as "2 minutes ago". Terminal commands use your
+desktop's local timezone, for example `Sep 29, 2026 at 9:09 AM EDT`.
 
 Local commands: `asset-alerts run`, `prices`, `status`, and `doctor`. Local `status`
 reads saved state; it does not prove that a bot process is currently alive. Local
@@ -134,15 +144,17 @@ src/asset_alerts/
   bot.py         Discord commands and background scheduling
   cli.py         Terminal entry point and single-process lock
   config.py      Environment settings
+  formatting.py  Local dates and Discord timestamps
   models.py      Assets, decimals, timestamps, and threshold comparisons
   provider.py    Price API transport and response validation
   storage.py     SQLite rules, last quotes, health, and delivery queue
   monitor.py     Price checks and notification retries
 tests/           Offline behavior tests
 deploy/          Example systemd user service
-docs/            Discord setup
+docs/            Discord setup and the history/charting/migration plan
 ```
 
 Secrets, the virtual environment, and `data/` are ignored by Git. To back up the
-database, stop the service and copy `data/`, then start it again. The repo is
-initialized locally on `main`; add your remote when ready.
+database today, stop the bot and copy its entire `data/` directory, then start it
+again. See the [migration plan](docs/plan.md#moving-from-the-laptop-to-the-main-pc)
+for a machine-to-machine transfer and custom database paths.

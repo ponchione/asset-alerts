@@ -11,8 +11,9 @@ from discord import app_commands
 from discord.ext import tasks
 
 from asset_alerts.config import Settings
+from asset_alerts.formatting import discord_timestamp
 from asset_alerts.models import Asset, Direction, positive_price, utcnow
-from asset_alerts.monitor import Monitor, alert_message, price_text
+from asset_alerts.monitor import Monitor, alert_message
 from asset_alerts.provider import GoldAPI
 from asset_alerts.storage import Store
 
@@ -110,15 +111,26 @@ def register_commands(bot: PriceBot) -> None:
 
     @bot.tree.command(name="prices", description="Show the latest checked prices", guild=guild)
     async def prices(interaction: discord.Interaction):
-        lines = []
+        blocks = []
+        now = utcnow()
         for asset in Asset:
             quote = bot.store.latest(asset)
-            lines.append(
-                price_text(asset, quote, bot.settings.max_quote_age_seconds, utcnow())
-                if quote
-                else f"{asset.value.title()}: no valid quote yet; see /status."
+            if quote is None:
+                blocks.append(
+                    f"**{asset.value.title()}**\n"
+                    "No price available yet.\n"
+                    "-# Check /status for details."
+                )
+                continue
+            block = (
+                f"**{asset.value.title()}**\n"
+                f"**${quote.price:,.2f}** USD / {asset.unit}\n"
+                f"-# Updated {discord_timestamp(quote.updated_at)}"
             )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            if not quote.is_fresh(now, bot.settings.max_quote_age_seconds):
+                block += "\n⚠️ **Stale quote — waiting for a fresh price.**"
+            blocks.append(block)
+        await interaction.response.send_message("\n\n".join(blocks), ephemeral=True)
 
     @bot.tree.command(
         name="status", description="Show price checks and delivery health", guild=guild
@@ -127,7 +139,7 @@ def register_commands(bot: PriceBot) -> None:
         running = "running" if bot.poll.is_running() else "STOPPED"
         await interaction.response.send_message(
             f"Monitor: {running}; checks every {bot.settings.poll_seconds}s\n"
-            + bot.store.status_text(),
+            + bot.store.status_text(format_time=discord_timestamp),
             ephemeral=True,
         )
 

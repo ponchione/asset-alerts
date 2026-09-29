@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+from asset_alerts.formatting import TimestampFormatter, local_timestamp
 from asset_alerts.models import Asset, Direction, Quote, matches, positive_price, utcnow
 
 SCHEMA = """
@@ -162,7 +163,7 @@ class Store:
                 (error, delivery_id),
             )
 
-    def status_text(self) -> str:
+    def status_text(self, *, format_time: TimestampFormatter = local_timestamp) -> str:
         lines = []
         for asset in Asset:
             health = self.db.execute(
@@ -170,13 +171,15 @@ class Store:
             ).fetchone()
             quote = self.db.execute("SELECT * FROM quotes WHERE asset=?", (asset.value,)).fetchone()
             if health:
-                lines.append(f"{asset.value}: checked {health['checked_at']}")
+                lines.append(f"{asset.value}: checked {format_time(health['checked_at'])}")
                 if health["error"]:
                     lines.append(f"  Problem: {health['error']}")
             else:
                 lines.append(f"{asset.value}: not checked yet")
             if quote:
-                lines.append(f"  Last valid quote: ${quote['price']} at {quote['updated_at']}")
+                lines.append(
+                    f"  Last valid quote: ${quote['price']} at {format_time(quote['updated_at'])}"
+                )
         counts = self.db.execute("SELECT state, COUNT(*) n FROM alerts GROUP BY state").fetchall()
         lines.append("Rules: " + (", ".join(f"{r['state']}={r['n']}" for r in counts) or "none"))
         pending = self.pending()

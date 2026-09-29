@@ -1,6 +1,8 @@
 # Project conventions
 
 - Personal, single-user Discord bot for gold, silver, and bitcoin, running on Linux.
+- Keep required services free. Follow `docs/plan.md` for upcoming history, backup,
+  charting, and migration work; proposed commands are not implemented yet.
 - Python 3.12+, `uv`, SQLite. Keep the domain and persistence independent of Discord.
 - Use `Decimal` for prices and timezone-aware UTC timestamps.
 - Every slash command must enforce the configured owner, guild, and channel.

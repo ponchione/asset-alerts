@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 
+from asset_alerts.formatting import TimestampFormatter, discord_timestamp, local_timestamp
 from asset_alerts.models import Asset, utcnow
 
 log = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ def alert_message(delivery, owner_id: int) -> str:
         f"<@{owner_id}> **{asset.value.title()} reached your target**\n"
         f"Observed: ${Decimal(delivery['price']):,.2f} USD / {asset.unit}\n"
         f"Target: {delivery['direction']} or equal to ${Decimal(delivery['threshold']):,.2f}\n"
-        f"Quote time: {delivery['quote_time']}\n"
+        f"Quote time: {discord_timestamp(delivery['quote_time'])}\n"
         f"Alert #{delivery['alert_id']} · one-time · source: gold-api.com\n"
         "This records the quote when triggered; delivery may be delayed during an outage."
     )
@@ -57,9 +58,16 @@ class Monitor:
                 self.store.delivered(item["id"], message_id)
 
 
-def price_text(asset: Asset, quote, max_age: int, now: datetime) -> str:
+def price_text(
+    asset: Asset,
+    quote,
+    max_age: int,
+    now: datetime,
+    *,
+    format_time: TimestampFormatter = local_timestamp,
+) -> str:
     age = "" if quote.is_fresh(now, max_age) else " [STALE: alerts skipped]"
     return (
         f"{asset.value.title()}: ${quote.price:,.2f} USD / {asset.unit}{age}\n"
-        f"  Quote time: {quote.updated_at.isoformat()}"
+        f"  Quote time: {format_time(quote.updated_at)}"
     )

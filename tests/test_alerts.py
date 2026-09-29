@@ -177,7 +177,7 @@ class StoreTests(unittest.TestCase):
         self.check()
         message = alert_message(self.store.pending()[0], 42)
         self.assertIn("<@42>", message)
-        self.assertIn(NOW.isoformat(), message)
+        self.assertIn(f"<t:{int(NOW.timestamp())}:f>", message)
         self.assertIn("Alert #1", message)
 
 
