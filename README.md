@@ -124,8 +124,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 Discord command tests skip when `discord.py` is unavailable. Tests use fake
 prices and notifications; they never connect to Discord or the price API.
-If dependency downloads are unavailable, core tests can still run; repeat
-`uv sync` when online to generate `uv.lock`, then commit that lockfile.
+`uv.lock` records the resolved dependency versions. Use `uv sync --locked` to
+install those versions. If downloads are unavailable, core tests can still run.
 
 Layout:
 
