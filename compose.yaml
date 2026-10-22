@@ -1,0 +1,27 @@
+services:
+  asset-alerts:
+    build: .
+    restart: unless-stopped
+    init: true
+    user: "${ASSET_ALERTS_UID:-1000}:${ASSET_ALERTS_GID:-1000}"
+    stop_signal: SIGINT
+    environment:
+      # Always keep SQLite, its companion files, and the process lock on the mount.
+      DATABASE_PATH: /app/data/alerts.sqlite3
+    volumes:
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

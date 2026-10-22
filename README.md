@@ -91,7 +91,105 @@ Data comes from [Gold API](https://gold-api.com/docs), using `/price/XAU`,
 and [terms](https://gold-api.com/terms). Prices are indicative spot/reference quotes;
 dealer premiums and exchange-specific execution prices are outside this first version.
 
-## Run automatically on Linux
+## Run with Docker Engine in WSL
+
+Requires Docker Engine running inside WSL and the Docker Compose plugin. The
+container runs in the background with automatic restarts and bounded logs.
+Dependencies are installed from `uv.lock` during the image build; host Python
+and uv are not required for this deployment.
+
+Create `.env` using the Discord setup above if it does not already exist. Stop
+any foreground bot or systemd bot service before starting the container. Keep
+only one active bot across machines. If moving an existing database, follow the
+[migration plan](docs/plan.md#moving-from-the-laptop-to-the-main-pc) first.
+
+From the project directory:
+
+```bash
+mkdir -p data
+chmod 700 data
+chmod 600 .env
+docker compose --env-file /dev/null build
+docker compose --env-file /dev/null run --rm asset-alerts doctor
+docker compose --env-file /dev/null up -d
+docker compose --env-file /dev/null logs --tail 50 -f
+```
+
+The bot reads `.env` through a read-only mount at runtime. It is excluded from
+the image and build context. `--env-file /dev/null` prevents Compose from also
+parsing it for variable substitution. The container runs as UID/GID 1000 by
+default, matching the initial WSL user. If your account uses different IDs, run
+`export ASSET_ALERTS_UID=$(id -u) ASSET_ALERTS_GID=$(id -g)` before Compose commands.
+
+SQLite is always stored at `./data/alerts.sqlite3` on the host. Compose overrides
+`DATABASE_PATH` to `/app/data/alerts.sqlite3` so it stays on the persistent mount.
+If the previous installation used a custom path, transfer its stopped database
+and companion files to `./data/alerts.sqlite3` before starting. Container rebuilds
+and `docker compose down` preserve this host directory.
+
+Run `/status` and `/prices` in Discord to check monitoring, and `/test-alert` in
+the configured test channel to verify delivery. `doctor` only checks local
+configuration. `docker compose ps` shows process state, not feed health.
+
+Stop with `docker compose --env-file /dev/null stop`. After changing `.env`, run
+`docker compose --env-file /dev/null up -d --force-recreate`; after changing code,
+run `docker compose --env-file /dev/null up -d --build`.
+
+Docker's `unless-stopped` policy restarts an exited bot while the engine runs;
+a deliberately stopped container stays stopped, including after a reboot. Enable
+the Docker daemon in WSL so it starts whenever the distribution starts:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+WSL also needs a foreground process to keep it running after terminals close;
+systemd services alone do not provide that. The supplied
+[Windows startup installer](deploy/install-windows-startup.ps1) registers a task
+that runs `sleep infinity` inside WSL. It starts at Windows boot and retries every
+minute if the process exits. It keeps WSL running independently of this session;
+Docker's restart policy handles the existing bot container.
+
+Open **Windows PowerShell as administrator using the Windows account that owns
+the distribution**, then run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-26.04\home\mitch\source\asset-alerts\deploy\install-windows-startup.ps1"
+Get-ScheduledTask -TaskName 'Asset Alerts - WSL' | Get-ScheduledTaskInfo
+```
+
+The defaults match the desktop deployment: distribution `Ubuntu-26.04`, Linux
+user `mitch`, task `Asset Alerts - WSL`. Override them with `-Distribution`,
+`-LinuxUser`, and `-TaskName` when installing elsewhere. The installer starts the
+task immediately. It uses the current Windows account with S4U to run without
+an interactive login or a stored password. It does not configure automatic
+Windows login. An unrelated task with the same name is refused unless
+`-ReplaceExistingTask` is explicitly passed. Disable and stop a running task
+before reinstalling it.
+
+For intentional WSL shutdown or task maintenance, first run these in Windows
+PowerShell; otherwise the minute trigger can restart WSL:
+
+```powershell
+Disable-ScheduledTask -TaskName 'Asset Alerts - WSL'
+Stop-ScheduledTask -TaskName 'Asset Alerts - WSL'
+```
+
+Resume with `Enable-ScheduledTask -TaskName 'Asset Alerts - WSL'` followed by
+`Start-ScheduledTask -TaskName 'Asset Alerts - WSL'`. To remove the startup task,
+disable and stop it first, then use
+`Unregister-ScheduledTask -TaskName 'Asset Alerts - WSL'`.
+These task commands control the WSL keepalive process. Stop the bot itself with
+the Compose stop command above.
+
+An on-demand task launch verifies the scheduled-task context; actual startup
+before login must be checked after a later Windows reboot. The installer does
+not reboot the desktop or stop WSL. Keep the desktop powered, awake, and connected
+to the internet. See [Docker restart policies](https://docs.docker.com/engine/containers/start-containers-automatically/),
+[Microsoft's WSL lifecycle notes](https://learn.microsoft.com/en-us/windows/wsl/systemd),
+and [Task Scheduler logon types](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-logontype-principaltype-element).
+
+## Run automatically on Linux with systemd
 
 After the foreground bot and `/test-alert` work, stop the foreground process
 with Ctrl+C. The supplied user service assumes this checkout is at
