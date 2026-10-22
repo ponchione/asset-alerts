@@ -12,6 +12,8 @@ dependencies = [
   "aiohttp>=3.14.4,<4",
   "discord.py>=2.6,<3",
   "python-dotenv>=1.1,<2",
+  "matplotlib>=3.10,<4",
+  "tzdata>=2025.2",
 ]
 
 [project.scripts]

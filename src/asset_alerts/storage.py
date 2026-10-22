@@ -1,7 +1,9 @@
 """SQLite rules and durable notification queue for one bot process."""
 
+import os
 import sqlite3
-from datetime import datetime
+import tempfile
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -42,15 +44,66 @@ CREATE TABLE IF NOT EXISTS health (
 );
 """
 
+HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS quote_history (
+    asset TEXT NOT NULL,
+    price TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (asset, updated_at)
+);
+CREATE TABLE IF NOT EXISTS briefings (
+    local_date TEXT PRIMARY KEY,
+    scheduled_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    sent_at TEXT,
+    message_id TEXT
+);
+CREATE TABLE IF NOT EXISTS briefing_schedule (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at TEXT NOT NULL
+);
+"""
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Timestamps must include a timezone.")
+    return value.astimezone(UTC)
+
+
+def _timestamp(value: datetime) -> str:
+    # Fixed precision keeps SQLite text comparisons chronological, including exact seconds.
+    return _utc(value).isoformat(timespec="microseconds")
+
 
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=5)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript(SCHEMA)
+        try:
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.execute("PRAGMA journal_mode=WAL")
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version > 1:
+                raise ValueError(f"Database schema version {version} is newer than supported (1).")
+            if version < 1:
+                self.db.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + SCHEMA
+                    + HISTORY_SCHEMA
+                    + "\nPRAGMA user_version=1;\nCOMMIT;"
+                )
+        except BaseException:
+            self.db.rollback()
+            self.db.close()
+            raise
 
     def close(self) -> None:
         self.db.close()
@@ -60,6 +113,34 @@ class Store:
         if row is None:
             return None
         return Quote(asset, Decimal(row["price"]), datetime.fromisoformat(row["updated_at"]))
+
+    def history(self, asset: Asset, start: datetime, end: datetime) -> list[Quote]:
+        rows = self.db.execute(
+            """SELECT price, updated_at FROM quote_history
+               WHERE asset=? AND updated_at>=? AND updated_at<=? ORDER BY updated_at""",
+            (asset.value, _timestamp(start), _timestamp(end)),
+        ).fetchall()
+        return [
+            Quote(asset, Decimal(row["price"]), datetime.fromisoformat(row["updated_at"]))
+            for row in rows
+        ]
+
+    def history_bounds(self, asset: Asset) -> tuple[datetime | None, datetime | None, int]:
+        row = self.db.execute(
+            """SELECT MIN(updated_at) first, MAX(updated_at) last, COUNT(*) count
+               FROM quote_history WHERE asset=?""",
+            (asset.value,),
+        ).fetchone()
+        return (
+            datetime.fromisoformat(row["first"]) if row["first"] else None,
+            datetime.fromisoformat(row["last"]) if row["last"] else None,
+            row["count"],
+        )
+
+    def active_alerts(self, asset: Asset) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM alerts WHERE asset=? AND state='active' ORDER BY id", (asset.value,)
+        ).fetchall()
 
     def add(self, asset: Asset, direction: Direction, threshold: Decimal) -> int:
         price = positive_price(threshold)
@@ -101,10 +182,16 @@ class Store:
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO health(asset, checked_at, error) VALUES (?, ?, ?)",
-                (asset.value, now.isoformat(), error),
+                (asset.value, _timestamp(now), error),
             )
 
     def record_and_evaluate(self, quote: Quote, now: datetime, max_age: int) -> None:
+        now = _utc(now)
+        try:
+            quote = Quote(quote.asset, positive_price(quote.price), _utc(quote.updated_at))
+        except (ValueError, TypeError, AttributeError) as exc:
+            self.health(quote.asset, now, f"Invalid quote; alerts skipped: {exc}")
+            return
         if not quote.is_fresh(now, max_age):
             self.health(quote.asset, now, "Stale or future-dated quote; alerts skipped.")
             return
@@ -120,8 +207,19 @@ class Store:
                 (
                     quote.asset.value,
                     str(quote.price),
-                    quote.updated_at.isoformat(),
-                    now.isoformat(),
+                    _timestamp(quote.updated_at),
+                    _timestamp(now),
+                ),
+            )
+            self.db.execute(
+                """INSERT OR IGNORE INTO quote_history
+                   (asset, price, updated_at, collected_at, source) VALUES (?, ?, ?, ?, ?)""",
+                (
+                    quote.asset.value,
+                    str(quote.price),
+                    _timestamp(quote.updated_at),
+                    _timestamp(now),
+                    "gold-api.com",
                 ),
             )
             rules = self.db.execute(
@@ -135,12 +233,92 @@ class Store:
                         (
                             rule["id"],
                             str(quote.price),
-                            quote.updated_at.isoformat(),
-                            now.isoformat(),
+                            _timestamp(quote.updated_at),
+                            _timestamp(now),
                         ),
                     )
                     self.db.execute("UPDATE alerts SET state='triggered' WHERE id=?", (rule["id"],))
-        self.health(quote.asset, now, None)
+            self.db.execute(
+                "INSERT OR REPLACE INTO health(asset, checked_at, error) VALUES (?, ?, NULL)",
+                (quote.asset.value, _timestamp(now)),
+            )
+
+    def queue_briefing(
+        self, local_date: str, scheduled_at: datetime, payload: str, now: datetime
+    ) -> bool:
+        with self.db:
+            cursor = self.db.execute(
+                """INSERT OR IGNORE INTO briefings
+                   (local_date, scheduled_at, created_at, payload) VALUES (?, ?, ?, ?)""",
+                (local_date, _timestamp(scheduled_at), _timestamp(now), payload),
+            )
+        return cursor.rowcount == 1
+
+    def briefing_started_at(self, now: datetime) -> datetime:
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO briefing_schedule(id, started_at) VALUES (1, ?)",
+                (_timestamp(now),),
+            )
+            row = self.db.execute("SELECT started_at FROM briefing_schedule WHERE id=1").fetchone()
+        return datetime.fromisoformat(row["started_at"])
+
+    def briefing_exists(self, local_date: str) -> bool:
+        return (
+            self.db.execute("SELECT 1 FROM briefings WHERE local_date=?", (local_date,)).fetchone()
+            is not None
+        )
+
+    def pending_briefings(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM briefings WHERE status='pending' ORDER BY scheduled_at, local_date"
+        ).fetchall()
+
+    def briefing_delivered(self, local_date: str, message_id: int, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                """UPDATE briefings SET status='sent', sent_at=?, message_id=?,
+                   attempts=attempts+1, last_error=NULL WHERE local_date=? AND status='pending'""",
+                (_timestamp(now), str(message_id), local_date),
+            )
+
+    def briefing_failed(self, local_date: str, error: str) -> None:
+        with self.db:
+            self.db.execute(
+                """UPDATE briefings SET attempts=attempts+1, last_error=?
+                   WHERE local_date=? AND status='pending'""",
+                (error, local_date),
+            )
+
+    def backup(self, output: Path) -> Path:
+        """Publish a verified, self-contained snapshot without replacing an existing file."""
+        output = output.absolute()
+        if os.path.lexists(output):
+            raise FileExistsError(f"Backup destination already exists: {output}")
+        if self.db.in_transaction:
+            raise ValueError("Cannot back up during an uncommitted transaction.")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                self.db.backup(target)
+                target.execute("PRAGMA journal_mode=DELETE")
+                results = target.execute("PRAGMA integrity_check").fetchall()
+                if results != [("ok",)]:
+                    raise ValueError("Backup integrity check failed.")
+            finally:
+                target.close()
+            # The hard link publishes atomically and fails even if a destination was
+            # created while the snapshot was being written. Both paths share a filesystem.
+            os.link(temporary, output)
+            return output
+        finally:
+            temporary.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(str(temporary) + suffix).unlink(missing_ok=True)
 
     def pending(self) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -180,6 +358,14 @@ class Store:
                 lines.append(
                     f"  Last valid quote: ${quote['price']} at {format_time(quote['updated_at'])}"
                 )
+            first, last, count = self.history_bounds(asset)
+            if count:
+                lines.append(
+                    f"  History: {count} observations, "
+                    f"{format_time(first.isoformat())} to {format_time(last.isoformat())}"
+                )
+            else:
+                lines.append("  History: no observations yet")
         counts = self.db.execute("SELECT state, COUNT(*) n FROM alerts GROUP BY state").fetchall()
         lines.append("Rules: " + (", ".join(f"{r['state']}={r['n']}" for r in counts) or "none"))
         pending = self.pending()
@@ -187,4 +373,9 @@ class Store:
         for delivery in pending[:3]:
             if delivery["last_error"]:
                 lines.append(f"  Alert #{delivery['alert_id']}: {delivery['last_error']}")
+        briefings = self.pending_briefings()
+        lines.append(f"Pending briefings: {len(briefings)}")
+        for briefing in briefings[:3]:
+            if briefing["last_error"]:
+                lines.append(f"  Briefing {briefing['local_date']}: {briefing['last_error']}")
         return "\n".join(lines)

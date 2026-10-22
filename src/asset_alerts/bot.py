@@ -1,6 +1,7 @@
 """Owner-only, guild-scoped Discord slash commands."""
 
 import asyncio
+import io
 import logging
 from contextlib import suppress
 from decimal import Decimal
@@ -10,7 +11,10 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+from asset_alerts.briefing import briefing_text, build_briefing
+from asset_alerts.charts import render_briefing_chart
 from asset_alerts.config import Settings
+from asset_alerts.daily import DailyBriefing
 from asset_alerts.formatting import discord_timestamp
 from asset_alerts.models import Asset, Direction, positive_price, utcnow
 from asset_alerts.monitor import Monitor, alert_message
@@ -60,6 +64,7 @@ class PriceBot(discord.Client):
         self.session = None
         self.channel = None
         self.monitor = None
+        self.daily_briefing = None
         register_commands(self)
 
     async def setup_hook(self) -> None:
@@ -73,14 +78,54 @@ class PriceBot(discord.Client):
         self.monitor = Monitor(
             self.store, GoldAPI(self.session), self.send_alert, self.settings.max_quote_age_seconds
         )
+        self.daily_briefing = DailyBriefing(
+            self.store, self.settings, self.monitor.check_prices, self.send_briefing
+        )
         await self.tree.sync(guild=discord.Object(id=self.settings.guild_id))
         self.poll.change_interval(seconds=self.settings.poll_seconds)
         self.poll.start()
+        if self.settings.briefing_enabled:
+            self.store.briefing_started_at(utcnow())
+            self.briefings.start()
         log.info("Commands registered; waiting for Discord connection.")
 
     async def send_alert(self, delivery) -> int:
         message = await self.channel.send(alert_message(delivery, self.settings.owner_id))
         return message.id
+
+    async def briefing_message(self, payload) -> tuple[str, discord.File | None]:
+        text = briefing_text(payload)
+        channel = self.get_channel(self.settings.channel_id) or self.channel
+        member = channel.guild.me if channel else None
+        if not member or not channel.permissions_for(member).attach_files:
+            return text + "\nChart unavailable: the bot needs Attach Files permission.", None
+        png = await asyncio.to_thread(render_briefing_chart, payload)
+        return text, discord.File(io.BytesIO(png), filename="market-briefing.png")
+
+    async def send_briefing(self, payload) -> int:
+        text, chart = await self.briefing_message(payload)
+        try:
+            kwargs = {"file": chart} if chart else {}
+            message = await self.channel.send(
+                text, allowed_mentions=discord.AllowedMentions.none(), **kwargs
+            )
+            return message.id
+        finally:
+            if chart:
+                chart.close()
+
+    @tasks.loop(seconds=30)
+    async def briefings(self) -> None:
+        try:
+            async with self.operation_lock:
+                await self.daily_briefing.prepare()
+            await self.daily_briefing.deliver()
+        except Exception as exc:
+            log.error("Briefing cycle failed (%s); retrying next cycle.", type(exc).__name__)
+
+    @briefings.before_loop
+    async def before_briefings(self) -> None:
+        await self.wait_until_ready()
 
     @tasks.loop(seconds=300)
     async def poll(self) -> None:
@@ -96,11 +141,13 @@ class PriceBot(discord.Client):
         await self.wait_until_ready()
 
     async def close(self) -> None:
-        self.poll.cancel()
-        task = self.poll.get_task()
-        if task:
-            with suppress(asyncio.CancelledError):
-                await task
+        for loop in (self.poll, self.briefings):
+            loop.cancel()
+        for loop in (self.poll, self.briefings):
+            task = loop.get_task()
+            if task:
+                with suppress(asyncio.CancelledError):
+                    await task
         if self.session:
             await self.session.close()
         await super().close()
@@ -108,6 +155,29 @@ class PriceBot(discord.Client):
 
 def register_commands(bot: PriceBot) -> None:
     guild = discord.Object(id=bot.settings.guild_id)
+
+    @bot.tree.command(
+        name="briefing", description="Preview your market briefing privately", guild=guild
+    )
+    async def briefing(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        async with bot.operation_lock:
+            payload = build_briefing(
+                bot.store,
+                utcnow(),
+                bot.settings.max_quote_age_seconds,
+                bot.settings.briefing_timezone,
+                bot.settings.poll_seconds,
+            )
+        text, chart = await bot.briefing_message(payload)
+        try:
+            kwargs = {"file": chart} if chart else {}
+            await interaction.followup.send(
+                text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), **kwargs
+            )
+        finally:
+            if chart:
+                chart.close()
 
     @bot.tree.command(name="prices", description="Show the latest checked prices", guild=guild)
     async def prices(interaction: discord.Interaction):
@@ -137,8 +207,15 @@ def register_commands(bot: PriceBot) -> None:
     )
     async def status(interaction: discord.Interaction):
         running = "running" if bot.poll.is_running() else "STOPPED"
+        schedule = (
+            f"Daily briefing: {bot.settings.briefing_time} {bot.settings.briefing_timezone}"
+            f" ({'running' if bot.briefings.is_running() else 'STOPPED'})\n"
+            if bot.settings.briefing_enabled
+            else "Daily briefing: disabled\n"
+        )
         await interaction.response.send_message(
             f"Monitor: {running}; checks every {bot.settings.poll_seconds}s\n"
+            + schedule
             + bot.store.status_text(format_time=discord_timestamp),
             ephemeral=True,
         )

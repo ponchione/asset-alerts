@@ -264,6 +264,24 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Settings.from_env()
 
+    def test_briefing_configuration_validates_time_timezone_and_enabled_flag(self):
+        for key, value in (
+            ("BRIEFING_ENABLED", "maybe"),
+            ("BRIEFING_TIME", "25:00"),
+            ("BRIEFING_TIME", "8:00"),
+            ("BRIEFING_TIME", "08:60"),
+            ("BRIEFING_TIMEZONE", "Not/A_Zone"),
+        ):
+            with self.subTest(key=key, value=value):
+                with patch.dict("os.environ", {key: value}, clear=True):
+                    with self.assertRaises(ValueError):
+                        Settings.from_env()
+        with patch.dict("os.environ", {"BRIEFING_ENABLED": "true"}, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.briefing_enabled)
+        self.assertEqual(settings.briefing_time, "08:00")
+        self.assertEqual(settings.briefing_timezone, "America/New_York")
+
     def test_token_never_shown_in_doctor_or_repr(self):
         env = {
             "DISCORD_TOKEN": "secret-test-token",
@@ -286,6 +304,19 @@ class ConfigurationTests(unittest.TestCase):
                     self.fail("Second lock should not be acquired")
             with instance_lock(path):
                 pass
+
+    def test_backup_reports_failure_if_source_database_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "missing.sqlite3"
+            output = Path(directory) / "backup.sqlite3"
+            with patch.dict("os.environ", {"DATABASE_PATH": str(source)}, clear=True):
+                with redirect_stdout(io.StringIO()) as message:
+                    result = main(
+                        ["--env-file", "/nonexistent-env-file", "backup", "--output", str(output)]
+                    )
+            self.assertEqual(result, 2)
+            self.assertFalse(output.exists())
+            self.assertIn("no backup was created", message.getvalue())
 
 
 if __name__ == "__main__":

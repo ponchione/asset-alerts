@@ -4,9 +4,10 @@ A personal Discord bot for gold, silver, and bitcoin prices. Runs locally on
 Linux and sends alerts to one private channel. Only your Discord account
 can use its commands, and only in that channel.
 
-The [next-step plan](docs/plan.md) covers free price-history collection, charts,
-database backups, and moving from the laptop to the main PC. History, charting,
-and a backup command are planned; the reference below describes what works today.
+The bot collects local price history and can send a daily market briefing with
+charts, price changes, and nearby alert targets. It also supports portable SQLite
+backups. The [next-step plan](docs/plan.md) records completed work, future chart
+commands, and migration instructions.
 
 ## First setup
 
@@ -38,7 +39,8 @@ the local `prices` command or core tests.
 | Command | Purpose |
 | --- | --- |
 | `/prices` | Latest valid quotes from the monitor, with timestamps and stale labels |
-| `/status` | Check times, feed errors, rule counts, and pending deliveries |
+| `/briefing` | Private preview of prices, changes, nearest alerts, and seven-day charts |
+| `/status` | Check times, feed errors, history coverage, briefing schedule, and pending deliveries |
 | `/test-alert` | Send a test message mentioning you in the configured channel |
 | `/alert add asset:gold direction:below price:3000` | Create a one-time USD threshold |
 | `/alert list page:1` | List rules and delivery state, 10 per page |
@@ -57,9 +59,96 @@ Discord timestamps display a readable date and time in your timezone, together
 with a live relative age such as "2 minutes ago". Terminal commands use your
 desktop's local timezone, for example `Sep 29, 2026 at 9:09 AM EDT`.
 
-Local commands: `asset-alerts run`, `prices`, `status`, and `doctor`. Local `status`
-reads saved state; it does not prove that a bot process is currently alive. Local
-`prices` fetches quotes for inspection without changing rules or saved state.
+Local commands: `asset-alerts run`, `prices`, `status`, `doctor`, `briefing`, and
+`backup`. Local `status` reads saved state; it does not prove that a bot process
+is currently alive. Local `prices` fetches quotes for inspection without changing
+rules or saved state. Local `briefing` previews saved data without fetching prices
+or sending a Discord message.
+
+## Daily market briefing
+
+Enable the daily post in `.env` and restart the bot:
+
+```dotenv
+BRIEFING_ENABLED=true
+BRIEFING_TIME=08:00
+BRIEFING_TIMEZONE=America/New_York
+```
+
+This schedules a briefing every day at **8:00 AM Eastern**, following daylight
+saving time. New installations default to disabled. The time must use 24-hour
+`HH:MM` format, the timezone must be a valid IANA name, and the enable setting
+must be `true` or `false`; `doctor` validates these settings.
+
+The desktop deployment was enabled on October 3, 2026, with its first scheduled
+briefing on October 4 at 8:00 AM EDT. History collection is running for all three
+assets. A verified database backup was taken before the upgrade.
+
+Each briefing includes gold, silver, and bitcoin prices with quote timestamps,
+24-hour and seven-day percentage changes when enough history exists, the nearest
+active alert for each asset, and a PNG with three seven-day price panels. Quote
+times and chart labels use the configured briefing timezone. The post goes to the
+configured channel without mentioning or pinging you. Grant the bot **Attach
+Files** there for the chart; it still sends the text if that permission is missing.
+
+The scheduler checks every 30 seconds and refreshes prices when a new briefing
+is due. Feed and Discord delays can push delivery beyond the scheduled minute.
+First enabling it after today's scheduled time starts with tomorrow's briefing.
+Once enabled, restarting after the scheduled time catches up today's missed
+briefing; it does not create reports for earlier missed days.
+
+Each due report is saved as an immutable snapshot before sending. Failed sends
+retry oldest first, including after a restart, with the original date and data.
+Disabling the schedule preserves queued reports and stops their delivery until
+reenabled. Delivery has the same **at least once** guarantee as alerts: a crash
+after Discord accepts a message but before SQLite records success can cause a
+duplicate. The report date and generation time identify the snapshot.
+
+Run `/briefing` for a private preview at any time. It reads stored prices and
+history, makes no price-feed request, and does not consume or change the daily
+schedule. Preview it locally or save its chart without sending anything:
+
+```bash
+uv run asset-alerts briefing
+uv run asset-alerts briefing --chart data/briefing-preview.png
+```
+
+The chart path must be new; existing files are never overwritten. Standalone
+`/chart` commands and charts on triggered alerts remain future work.
+
+## History and backups
+
+History begins with accepted quotes collected by this version; old prices are
+not reconstructed. Only valid, fresh, in-order quotes enter history, and repeated
+provider timestamps for the same asset count as one observation. `/status` shows
+the available range and observation count for each asset.
+
+Briefing changes need a fresh current quote and an observation at or just before
+the 24-hour or seven-day comparison time. The allowed baseline gap is the larger
+of `MAX_QUOTE_AGE_SECONDS` and twice `POLL_SECONDS`. Missing comparisons are labeled
+as insufficient history; stale quotes are labeled and do not produce changes or
+alert distances. Charts label partial coverage and break lines across gaps rather
+than filling missing prices. Expect a warmup period, including gaps when metals
+markets are closed or the desktop is offline.
+
+Create a consistent, verified backup while the bot runs:
+
+```bash
+uv run asset-alerts backup --output data/backups/alerts-2026-10-03.sqlite3
+```
+
+This uses SQLite's backup API to write one standalone database containing rules,
+history, health, alerts, and queued briefings. It verifies integrity and refuses
+to overwrite an existing destination. It excludes `.env` and the Discord token.
+Backups are manual; automatic scheduling, rotation, and off-machine copies are
+not implemented.
+
+To restore, stop every bot instance using the destination database, preserve its
+existing database and companion files separately, and place the snapshot at the
+configured database path in a clean directory. Start only one bot and check
+`/status`, `/alert list`, and `/briefing`; pending deliveries remain pending in
+the restored snapshot. See the [migration instructions](docs/plan.md#moving-from-the-laptop-to-the-main-pc)
+for a machine-to-machine transfer and custom database paths.
 
 ## Alert behavior
 
@@ -240,19 +329,21 @@ Layout:
 ```text
 src/asset_alerts/
   bot.py         Discord commands and background scheduling
+  briefing.py    Price comparisons and durable briefing snapshots
+  charts.py      Local PNG charts from briefing snapshots
   cli.py         Terminal entry point and single-process lock
   config.py      Environment settings
+  daily.py       Timezone-aware daily schedule and delivery retries
   formatting.py  Local dates and Discord timestamps
   models.py      Assets, decimals, timestamps, and threshold comparisons
   provider.py    Price API transport and response validation
-  storage.py     SQLite rules, last quotes, health, and delivery queue
+  storage.py     SQLite history, rules, queues, health, and verified backups
   monitor.py     Price checks and notification retries
 tests/           Offline behavior tests
 deploy/          Example systemd user service
 docs/            Discord setup and the history/charting/migration plan
 ```
 
-Secrets, the virtual environment, and `data/` are ignored by Git. To back up the
-database today, stop the bot and copy its entire `data/` directory, then start it
-again. See the [migration plan](docs/plan.md#moving-from-the-laptop-to-the-main-pc)
-for a machine-to-machine transfer and custom database paths.
+Secrets, the virtual environment, and `data/` are ignored by Git. Keep exported
+backups and charts under `data/` or outside the checkout so private runtime data
+is not accidentally committed.

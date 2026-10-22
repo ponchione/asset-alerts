@@ -55,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("prices", help="Fetch prices without Discord or creating alerts")
     commands.add_parser("status", help="Read saved check and delivery status")
     commands.add_parser("doctor", help="Validate local configuration without connecting")
+    backup = commands.add_parser("backup", help="Write a verified, standalone SQLite backup")
+    backup.add_argument("--output", required=True, type=Path)
+    briefing = commands.add_parser("briefing", help="Preview a briefing locally without sending")
+    briefing.add_argument("--chart", type=Path, help="Also save the chart as a new PNG file")
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -78,6 +82,11 @@ def main(argv: list[str] | None = None) -> int:
                 else "Discord configuration is complete."
             )
             print("Local check only; credentials and channel access have not been verified.")
+            print(
+                f"Daily briefing: {settings.briefing_time} {settings.briefing_timezone}"
+                if settings.briefing_enabled
+                else "Daily briefing: disabled"
+            )
             return int(bool(missing))
         if args.command == "prices":
             return asyncio.run(fetch_prices(settings))
@@ -93,11 +102,35 @@ def main(argv: list[str] | None = None) -> int:
                     store.close()
             return 0
         if not settings.database_path.is_file():
+            if args.command == "backup":
+                raise ValueError("Database does not exist; no backup was created.")
             print("No saved state yet. Start the bot with: asset-alerts run")
             return 0
         store = Store(settings.database_path)
         try:
-            print(store.status_text())
+            if args.command == "backup":
+                print(f"Backup verified: {store.backup(args.output)}")
+            elif args.command == "briefing":
+                from asset_alerts.briefing import briefing_text, build_briefing
+
+                payload = build_briefing(
+                    store,
+                    utcnow(),
+                    settings.max_quote_age_seconds,
+                    settings.briefing_timezone,
+                    settings.poll_seconds,
+                )
+                print(briefing_text(payload))
+                if args.chart:
+                    from asset_alerts.charts import render_briefing_chart
+
+                    png = render_briefing_chart(payload)
+                    args.chart.parent.mkdir(parents=True, exist_ok=True)
+                    with args.chart.open("xb") as output:
+                        output.write(png)
+                    print(f"Chart saved: {args.chart.resolve()}")
+            else:
+                print(store.status_text())
         finally:
             store.close()
         return 0
@@ -106,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except ImportError:
         print("Dependencies are missing. Run uv sync from the project directory.")
+        return 2
+    except FileExistsError:
+        print("Output file already exists. Choose a new output path.")
         return 2
     except KeyboardInterrupt:
         return 0

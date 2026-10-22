@@ -1,16 +1,18 @@
-# Price history, charts, and moving to the main PC
+# Price history, daily briefings, charts, and migration
 
-Agreed plan as of September 29, 2026. This document describes upcoming work;
-history, charting, and a backup command are **not implemented yet**.
+Originally agreed September 29, 2026; implementation status updated October 3,
+2026. Price history, manual backups, and daily briefings with charts are now
+implemented. Standalone chart commands and automatic backup retention remain
+upcoming work.
 
 ## Decisions
 
 - Keep the project free to use. No paid APIs, historical-data subscriptions,
   hosting, or charting services.
-- Collect history on the laptop now, once history storage is implemented. There
-  is no need to wait for the main PC; the database will move with the application.
-- Build basic price history and individual asset charts first. Defer spreads,
-  ratios, and more advanced analysis.
+- Collect history on the main PC using the existing free feed. The laptop bot
+  was stopped and a fresh desktop database was approved on October 3, 2026.
+- The first history feature is a daily market briefing at 8:00 AM Eastern.
+  Defer standalone chart commands, spreads, ratios, and more advanced analysis.
 - Generate charts locally and post them in the existing private Discord channel.
 - Run one active bot instance across both machines. The existing process lock
   only protects instances sharing the same local database, not different PCs.
@@ -18,9 +20,12 @@ history, charting, and a backup command are **not implemented yet**.
 ## Current application
 
 The bot supports gold, silver, and bitcoin prices, one-time threshold alerts,
-readable Discord output, and terminal diagnostics. It saves rules, the latest
-accepted quote for each asset, delivery records, and health information in SQLite.
-It does not yet retain a continuous price history.
+daily briefings, private `/briefing` previews, and terminal diagnostics. SQLite
+stores rules, latest accepted quotes, accepted price history, health, and durable
+queues for alerts and briefing snapshots. Briefings include 24-hour and seven-day
+changes, nearest active alert targets, and a locally rendered PNG with one
+seven-day panel per asset. The desktop uses Docker in WSL with Windows startup
+automation; see the [README](../README.md#run-with-docker-engine-in-wsl).
 
 The default database is `data/alerts.sqlite3` inside the project directory.
 `DATABASE_PATH` in `.env` can override it; `uv run asset-alerts doctor` displays
@@ -30,58 +35,92 @@ The code and dependency lockfile live in Git. The database, `.env`, virtual
 environment, and runtime files are excluded from Git and must be transferred or
 recreated separately.
 
-## 1. Retain price history
+## 1. Retain price history — implemented
 
-Extend the existing SQLite database with a price-history table, keeping current
-rules, delivery state, and settings intact. Use a versioned, additive migration
-that is safe to run again on later startups.
+The existing SQLite database upgrades through a versioned, additive migration
+that preserves rules and delivery state and is safe on later startups.
 
-For every new accepted quote, store the asset, decimal price, UTC quote timestamp,
-collection timestamp, and source. Continue using the existing free price feed
-and five-minute polling interval. Deduplicate repeated provider timestamps per
-asset so polling an unchanged quote does not manufacture observations.
+Each new accepted quote stores the asset, decimal price, UTC quote timestamp,
+collection timestamp, and source. The existing free price feed and default
+five-minute polling interval remain in use. Repeated provider timestamps are
+deduplicated per asset, so polling an unchanged quote does not manufacture
+observations.
 
-Keep the existing freshness and out-of-order checks. Do not insert invalid or
-stale responses into the accepted history. Record outages through the existing
-health reporting. Retain collected observations initially; add retention or
-downsampling only when actual database growth warrants it.
+Freshness and out-of-order checks apply before history is accepted. Invalid and
+stale responses do not enter history, and failures appear in health reporting.
+`/status` reports the available range and observation count for each asset.
+Collected observations are retained; retention or downsampling can be added
+when actual database growth warrants it.
 
-History begins when this feature is enabled. No paid backfill is planned, and
-we cannot reconstruct prices missed while the laptop was asleep or disconnected.
+History begins with collection by this version. No backfill is fabricated, and
+prices missed while the desktop was offline cannot be reconstructed. A failed
+asset feed does not stop collection for the others.
 
-Completion criteria:
+## 2. Portable database backup — implemented
 
-- Existing databases upgrade without losing alerts or delivery records.
-- New observations survive restarts and repeated quotes do not create duplicates.
-- A failed asset feed does not stop history collection for the other assets.
-- `/status` reports the available history range and observation count per asset.
+The terminal command uses SQLite's backup API to write a consistent snapshot
+while the bot runs, including rules, history, health, alert deliveries, and queued
+briefings. The snapshot is one self-contained SQLite file, even when the source
+uses WAL mode:
 
-## 2. Add a portable database backup
-
-Add a terminal command using SQLite's backup API to write a consistent snapshot,
-including rules, deliveries, health, and collected history. The snapshot should
-be one self-contained SQLite file, even when the source is in WAL mode.
-
-Proposed interface, not available yet:
-
-```text
-asset-alerts backup --output /path/to/asset-alerts-backup.sqlite3
+```bash
+uv run asset-alerts backup --output /path/to/new-asset-alerts-backup.sqlite3
 ```
 
-Refuse to overwrite an existing file by default. Verify the snapshot's integrity
-and report its location. Do not include `.env` or the Discord token. Initially,
-restoring a snapshot will be a documented operation performed with the bot stopped.
+The command refuses existing destinations, verifies snapshot integrity, and
+reports its location. It excludes `.env` and the Discord token and needs neither
+a paid service nor a separate SQLite CLI. Restore only with the destination bot
+stopped, using a clean destination directory and preserving its previous database
+and companion files separately. Start only one bot after restoration.
 
-Completion criteria:
-
-- A backup can be taken while the collector is running.
-- The snapshot opens independently and contains the expected history and rules.
-- Backups do not require a new paid service or a separate SQLite CLI installation.
-- Restore instructions preserve pending notifications and require only one active bot.
+Backups are manual. Automatic schedules, rotation, retention, and off-machine
+backup copies are not implemented yet.
 
 Reference: [SQLite backup API](https://www.sqlite.org/backup.html).
 
-## 3. Add basic charts in Discord
+## 3. Daily market briefing — implemented
+
+`BRIEFING_ENABLED` defaults to `false`. The requested schedule is enabled with
+`BRIEFING_ENABLED=true`, `BRIEFING_TIME=08:00`, and
+`BRIEFING_TIMEZONE=America/New_York`, every day including weekends. Time and
+timezone settings are validated, and the timezone follows daylight saving time.
+The desktop deployment was upgraded and enabled on October 3, 2026, after a
+verified database backup. It is collecting history for all three assets; its
+first scheduled briefing is October 4 at 8:00 AM EDT.
+
+The scheduler checks every 30 seconds, refreshes prices when due, and queues an
+immutable JSON report before sending to the configured channel without a ping.
+Network delays can delay delivery. First activation after the scheduled time
+starts the next day. Restarts recover today's missed briefing but do not create
+unqueued reports for earlier days. Existing queued reports retry oldest first
+with their original date and data, including across restarts. Disabling the
+schedule pauses delivery and preserves that queue.
+
+Delivery is at least once: a crash after Discord accepts a post but before SQLite
+records success can duplicate it. Report dates and generation times distinguish
+snapshots. There is one queued snapshot per local date.
+
+Changes require a fresh current price and a baseline at or just before 24 hours
+or seven days ago, within the greater of the maximum quote age or two polling
+intervals. Missing comparisons say insufficient history. Stale prices are labeled
+and have no calculated change or alert distance. Charts show actual observations,
+partial coverage during warmup, and gaps between observations. They use explicit
+USD/unit labels and the configured briefing timezone.
+
+`/briefing` shows a private preview from saved data without fetching prices or
+consuming the daily schedule. The terminal equivalent never sends a message:
+
+```bash
+uv run asset-alerts briefing
+uv run asset-alerts briefing --chart data/new-briefing-preview.png
+```
+
+The optional PNG destination must not already exist. Discord chart rendering
+runs outside the event loop. The bot needs **Attach Files** in the configured
+channel for images and falls back to text when that permission is missing.
+Owner, server, and channel restrictions apply to the preview command.
+
+## 4. Standalone charts in Discord — upcoming
 
 Proposed command, not available yet:
 
@@ -106,8 +145,8 @@ coverage. If too few points exist for a useful chart, explain that collection is
 still warming up. Do not fabricate data or present sampled five-minute prices as
 full market OHLC candles.
 
-Before enabling chart uploads, grant the bot **Attach Files** in the private
-channel. Add **Embed Links** only if the implementation uses embeds. Preserve
+Briefing uploads already require **Attach Files** in the private channel.
+Add **Embed Links** only if a future implementation uses embeds. Preserve
 owner, server, and channel restrictions; chart replies should remain private to
 the command user unless public posting is explicitly selected later.
 
@@ -120,9 +159,11 @@ Completion criteria:
 
 ## Moving from the laptop to the main PC
 
-This move is possible with the current application and will also preserve history
-once that feature is added. The same Discord application, token, server, and
-channel can be reused.
+The initial move was completed October 3, 2026: the user confirmed the laptop bot
+was stopped and approved a fresh database on the main desktop, `PONCHIONE_MAIN`.
+The following instructions remain a reference for future transfers with saved
+rules and history. The same Discord application, token, server, and channel can
+be reused.
 
 1. Commit and push the current code, then clone or update the repository on the
    main PC to the same version. Run `uv sync --locked`. Do not start its bot yet.
@@ -138,25 +179,27 @@ channel can be reused.
    with `chmod 600 .env`. Adjust `DATABASE_PATH` if it contains a laptop-specific
    absolute path. Recreate the virtual environment using `uv`; do not copy it.
 5. Run `uv run asset-alerts doctor` and `uv run asset-alerts status` on the main PC.
-   Start the bot and check `/prices`, `/status`, `/alert list`, and `/test-alert`.
-   Once charting exists, check a chart includes the earlier laptop observations.
-6. Install and enable the service on the main PC using the README instructions.
+   Start the bot and check `/prices`, `/status`, `/alert list`, and `/test-alert`
+   in the configured test channel. Use `/briefing` to inspect retained history.
+6. Install and enable Docker/Windows startup automation or the Linux service
+   using the README instructions.
    Keep the laptop instance stopped. Retain the original copy as a backup until
    the move is verified.
 
-Once the backup command exists, a final snapshot taken after stopping the laptop
-bot can replace the full-directory transfer in step 3. Put that snapshot at the
-configured destination database path in a clean directory before starting the bot.
+A final `asset-alerts backup --output ...` snapshot taken after stopping the
+source bot can replace the full-directory transfer in step 3. Put that snapshot
+at the configured destination database path in a clean directory before starting
+the bot. Taking the final transfer snapshot after stopping prevents later source
+changes from being lost.
 
 Do not copy a live SQLite database using ordinary file-copy or cloud-sync tools.
-Use the planned backup command for live snapshots, or stop all database users
+Use the backup command for live snapshots, or stop all database users
 before copying the database and its companion files together.
 [SQLite explains the consistency requirements](https://www.sqlite.org/howtocorrupt.html#_backup_or_restore_while_a_transaction_is_active).
 
 ## Deferred ideas
 
-Spreads and asset ratios, normalized performance comparisons, scheduled daily
-briefings, percentage-change alerts, recurring alerts, and charts attached to
-triggered notifications can follow once history and basic charting are useful.
-They are not part of the next implementation pass. Paid data and paid backfills
-remain outside the project plan.
+Standalone `/chart` commands, automated backup schedules and retention, spreads
+and asset ratios, normalized performance comparisons, percentage-change alerts,
+recurring alerts, and charts attached to triggered notifications remain future
+work. Paid data and paid backfills remain outside the project plan.
