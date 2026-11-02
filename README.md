@@ -13,6 +13,20 @@ commands, and migration instructions.
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
+Pillow builds from source because its current binary wheels contain the
+CVE-2026-111497 decoder. On Ubuntu, install the build dependencies and the
+security-fixed system Brotli library before `uv sync`:
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libjpeg-dev zlib1g-dev libfreetype6-dev libbrotli-dev
+```
+
+Ubuntu 26.04 needs `libbrotli1` 1.2.0-3ubuntu0.1 or later. Ubuntu 24.04 needs
+1.1.0-2ubuntu0.1 or later. The Docker build checks the Debian backport and the
+decoder's fixed error table. Do not replace the source build with the current
+Pillow wheel; a system update does not repair a wheel's private library.
+
 ```bash
 cd ~/source/asset-alerts
 uv sync

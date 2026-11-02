@@ -22,6 +22,11 @@ asset-alerts = "asset_alerts.cli:main"
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.12,<0.17"]
 
+[tool.uv]
+# Pillow 13 wheels bundle the vulnerable Brotli 1.2.0 decoder. Build against
+# the patched system FreeType/Brotli libraries until fixed wheels are released.
+no-binary-package = ["pillow"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
